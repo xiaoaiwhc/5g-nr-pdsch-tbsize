@@ -1,0 +1,27 @@
+[package]
+name = "ecpri_pcap_parser"
+version = "0.1.0"
+authors = ["hongcwan"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pcap-parser = "0.9.1"  # Don't support nano-second pcap header
+# pcap-file = "1.1"
+ndarray = "0.13"
+ux = "*"
+nom = "5"
+hex-slice = "0.1.4"
+hex-literal = "0.2"
+# enum-primitive-derive = "^0.1"
+# num-traits = "^0.1"
+num_enum = "0.5"
+chrono = "0.4"
+
+[patch.crates-io]
+pcap-parser = { path = "./pcap-parser-0.9.1" }
+
+
+
+

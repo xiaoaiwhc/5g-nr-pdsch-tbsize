@@ -1,0 +1,7 @@
+Package: gsl
+Version: 2.6
+Architecture: x86-windows
+Multi-Arch: same
+Abi: e6c4570d675e59e362f24afbe6b066b3f4f435cb
+Description: The GNU Scientific Library is a numerical library for C and C++ programmers
+Type: Port
