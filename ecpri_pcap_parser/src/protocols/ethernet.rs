@@ -3,6 +3,7 @@ use nom::number::complete::be_u16;
 use nom::{bytes::complete::take as nom_take, combinator::map as nom_map};
 use nom::{error::ParseError, IResult, error::context};
 use nom::{sequence::tuple as nom_tuple};
+use pcap_parser::UnknownBlock;
 use crate::protocols::types;
 use std::convert::TryFrom;
 use std::convert::From;
@@ -14,21 +15,26 @@ pub struct Ethernet {
     pub ether_type: u16,
 }
 
-#[derive(Debug)]
-pub enum PacketDataType {
+#[derive(Debug, PartialEq)]
+pub enum SUPPORTED {
     BIP = 0x8951,
     ECPRI = 0x8100,
     PTP = 0x88F7,
-    UNKNOWN = 0x0
+}
+
+#[derive(Debug)]
+pub enum PacketDataType {
+    SUPPORTED(SUPPORTED),
+    UNKNOWN(u16),
 }
 
 impl PacketDataType {
     pub fn value(&self) -> &'static str {
-        match *self {
-            PacketDataType::BIP => "BIP",
-            PacketDataType::ECPRI => "eCPRI",
-            PacketDataType::PTP => "PTPv2",
-            PacketDataType::UNKNOWN => "Unknown"
+        match &*self {
+            BIP => "BIP",
+            ECPRI => "eCPRI",
+            PTP => "PTPv2",
+            _ => "UKNOWN Type",
         }
     }
 }
@@ -36,10 +42,10 @@ impl PacketDataType {
 impl From<u16> for PacketDataType {
     fn from(item: u16) -> Self {
         match item {
-            _ if item == Self::BIP as u16 => Self::BIP,
-            _ if item == Self::ECPRI as u16 => Self::ECPRI,
-            _ if item == Self::PTP as u16 => Self::PTP,
-            _ => Self::UNKNOWN,
+            _ if item == SUPPORTED::BIP as u16 => Self::SUPPORTED(SUPPORTED::BIP),
+            _ if item == SUPPORTED::ECPRI as u16 => Self::SUPPORTED(SUPPORTED::ECPRI),
+            _ if item == SUPPORTED::PTP as u16 => Self::SUPPORTED(SUPPORTED::PTP),
+            _ => Self::UNKNOWN(item),
         }
     }
 }

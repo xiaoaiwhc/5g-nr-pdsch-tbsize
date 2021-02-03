@@ -47,13 +47,13 @@ impl CommonHeader {
     }
 
     // The eAxC comprises data of one carrier related to one specific antenna (array)
-    pub fn get_eaxc_id(&self) -> usize {
-        // the first 8 bit of seqid is the eAxC id
-        // SequenceID: wrap-around individual per c_eAxC
-        // Ebit: last message in subseq, for Application layer fragm, Ebit=1, SubseqID = 0
-        // SubSequenceID: value = 0
-        (self.seqid >> 8) as usize
-    }
+    // pub fn get_eaxc_id(&self) -> usize {
+    //     // the first 8 bit of seqid is the eAxC id
+    //     // SequenceID: wrap-around individual per c_eAxC
+    //     // Ebit: last message in subseq, for Application layer fragm, Ebit=1, SubseqID = 0
+    //     // SubSequenceID: value = 0
+    //     (self.seqid >> 8) as usize
+    // }
 }
 
 impl fmt::Display for CommonHeader {
@@ -67,7 +67,7 @@ impl fmt::Display for CommonHeader {
                 self.message_type,
                 self.payload_size,
                 self.pcid,
-                self.get_eaxc_id(),
+                self.seqid,
         )
     }
 }
@@ -732,8 +732,10 @@ pub struct UPlaneIQData {
     pub slot_id: u8,           // 6 bits
     pub start_symbol_id: u8,   // 6 bits
     ////// number of sections ///////
+    Here maybe contain more than one section!!! We can move the SectionHeader into IQPrbuData !!!
+    also, the number of section will represent at related C-Plane message
     pub section_hdr: SectionHeader,
-    pub iq_prbu: Vec<IQPrbuData>,
+    pub iq_prbu: Vec<IQPrbuData>, // The size of IQPrbuData should be variable because of different mantissa size.
 }
 
 impl UPlaneIQData {
@@ -757,9 +759,10 @@ impl UPlaneIQData {
         )(data)
     }
 
-    pub fn parse(data: types::Input) -> types::Result<Self> {
+    pub fn parse(data: types::Input, mantissa: u16) -> types::Result<Self> {
         let (remaining, mut up_data) = UPlaneIQData::parse_without_sections(data)?;
-        match nom_count(IQPrbuData::parse, up_data.section_hdr.num_prbc as usize)(remaining) {
+        let iq_prbu_parse_with_mantissa = |data| IQPrbuData::parse(data, mantissa);
+        match nom_count(iq_prbu_parse_with_mantissa, up_data.section_hdr.num_prbc as usize)(remaining) {
             Ok((remain, iq_data)) => {
                 up_data.iq_prbu = iq_data;
                 Ok((remain, up_data))
@@ -801,6 +804,22 @@ impl fmt::Debug for UPlaneIQData {
 //      •Reserved/padding (4bit). Used for scale control in some Nokia systems
 //      •Exponent for I & Q samples (4bit).
 //      •INbit / QNbit I & Q samples. Number of bits is stream specific control.
+/////////
+//
+// ORAN-WG4.CUS.0-v02.00:
+// 
+// 6.3.3.16 iSample (in-phase sample)
+// Description: This parameter is the In-phase sample value.
+// Value range: {all zeros – all ones}.
+// Type: signed integer.
+// Field length: 1-16 bits.
+// 
+// 6.3.3.17 qSample (quadrature sample)
+// Description: This parameter is the Quadrature sample value.
+// Value range: {all zeros – all ones}.
+// Type: signed integer.
+// Field length: 1-16 bits
+
 pub struct IQPrbuData {
     pub reserved: u8,        // 4 bits
     pub exponent: u8,        // 4 bits
@@ -808,69 +827,46 @@ pub struct IQPrbuData {
     pub iq_sample: Vec<u8>,  // total 27 bytes, the I/Q samples, 9b case, size: [(u16, u16); 12], 9 bits
 }
 
-impl<'a> IQPrbuData {
-    // take total 27 bytes for IQ data:  (9 bits I + 9 bits Q) * 12
-    fn take_27_count(data: types::Input) -> types::Result<Vec<(u16, u16)>> {
-        let mut iq_data = Vec::new();
+impl IQPrbuData {
+    // For mantissa = 9, take total 27 bytes for IQ data:  (9 bits I + 9 bits Q) * 12
+    fn _get_iq_samples(data: (&[u8], usize), mantissa: u16) -> IResult<(&[u8], usize), Vec<(i16, i16)>> {
+        const RE_NUM: usize = 12;
+        let mut iq_data = Vec::<(i16, i16)>::new();
         let mut remain = data;
-        let part: Vec<_> = data[..10].iter().cloned().collect();
-        println!("start: {:?}", part);
-        for _ in 0..1 {
-            if let Ok((other, iq)) = IQPrbuData::take_36_bits(remain) {
-                println!("iq: {:010X}", iq);
-                let q2 = (iq & 0x01FF) as u16;
-                let i2 = (iq & 0x03FE00) as u16;
-                let q1 = ((iq >> 18) & 0x01FF) as u16;
-                let i1 = ((iq >> 18) & 0x03FE00) as u16;
-                iq_data.push((i1, q1));
-                iq_data.push((i2, q2));
-                remain = other;
-            }
+
+        let modulo: i16 = 1 << mantissa;
+        let max_value: i16 = (1 << (mantissa-1)) -1;
+
+        for _ in 0..RE_NUM {
+            let (other, i_real) = nom_bit_take(mantissa)(remain)?;
+            let (other, q_imag) = nom_bit_take(mantissa)(other)?;
+            let fix_two_complement = | i: i16 | {
+                // The RE binary representation is 2's complement.
+                if i < max_value { i } else { i - modulo }
+            };
+            iq_data.push((
+                fix_two_complement(i_real), 
+                fix_two_complement(q_imag)
+            ));
+            remain = other;
         }
-        let part: Vec<_> = remain[..10].iter().cloned().collect();
-        println!("27 bytes end: {:?}", part);
 
         Ok((remain, iq_data))
     }
 
-    // pick 36 bits every time, not pick 18 bits(9 bits I + 9 bits Q) because of the nom bug:
-    // the number of picked bits must be integral times of 4
-    fn take_36_bits(i: &[u8]) -> IResult<&[u8], u64> {
-        nom_bits(nom_bit_take::<_, _, _, (_, _)>(36_usize))(i)
+    pub fn get_iq_data<'a>(&'a self, mantissa: u16) -> IResult<&'a [u8], Vec<(i16, i16)>> {
+        let parser = |data: (&'a [u8], usize)| { IQPrbuData::_get_iq_samples(data, mantissa) };
+        nom_bits(parser)(&self.iq_sample[..])
     }
 
-    fn take_12_iq_data(data: (&[u8], usize)) -> IResult<(&[u8], usize), Vec<(i16, i16)>> {
-        let mut iq_data = Vec::new();
-        let mut remain = data;
-        for _ in 0..12 {
-            if let Ok((other, iq)) = IQPrbuData::take_18_bits(remain) {
-                let i = (iq >> 23) as i16;
-                let q = (iq & 0x1FF) as i16;
-                iq_data.push((i, q));
-                remain = other;
-            }
-        } 
-
-        Ok((remain, iq_data))
-    }
-
-    pub fn take_prbu_data(data: &[u8]) -> IResult<&[u8], Vec<(i16, i16)>> {
-        nom_bits(IQPrbuData::take_12_iq_data)(data)
-    }
-
-    // 9 bits I + 9 bits Q
-    fn take_18_bits(i: (&[u8], usize)) -> IResult<(&[u8], usize), u32> {
-        nom_bit_take::<_, _, _, (_, _)>(18_usize)(i)
-    }
-
-
-    pub fn parse(data: types::Input) -> types::Result<Self> {
+    pub fn parse(data: types::Input, mantissa: u16) -> types::Result<Self> {
+        let iq_data_size = mantissa * 2 * 12 / 8;  // (I + Q) * mantissa * re_count / byte_len
         nom_map(
             nom_tuple((
                 be_u8,
                 // IQPrbuData::take_27_count,
                 // IQPrbuData::take_1_prbu_data,
-                nom_take(27usize),
+                nom_take(iq_data_size),
             )),
             |(byte_u8, iq_sample)| Self {
                 reserved: (byte_u8 >> 4) as u8,
@@ -878,18 +874,6 @@ impl<'a> IQPrbuData {
                 iq_sample: iq_sample.to_vec(),
             }
         )(data)
-
-        // let (remain, byte_u8) = be_u8::<&[u8]>(&data).expect("Can't parse exponent part.");
-        // let(remain, prbu) = IQPrbuData::take_1_prbu_data(&remain).expect("Can't parse iq data.");
-        
-        // Ok((
-        //     remain,
-        //     Self {
-        //         reserved: (byte_u8 >> 4) as u8,
-        //         exponent: (byte_u8 & 0x0F) as u8,
-        //         iq_sample: prbu,
-        //     }
-        // ))
     }
 }
 
@@ -959,12 +943,12 @@ impl From<u16> for MessageType {
 // The "eCPRI application header(s)" and "eCPRI application payload" depend on the message type                                                                     
 
 #[derive(Debug)]
-pub enum SupportedType {
-    IQData(UPlaneIQData),
-    FCPType0(FCPSectionType0),
-    FCPType1(FCPSectionType1),
+pub enum EcpriType {
+    IQData(Box<UPlaneIQData>),
+    FCPType0(Box<FCPSectionType0>),
+    FCPType1(Box<FCPSectionType1>),
     // FCPType2(FCPSectionType2),
-    FCPType3(FCPSectionType3),
+    FCPType3(Box<FCPSectionType3>),
 }
 
 pub fn is_ecpri_data(data: &[u8]) -> types::Result<bool> {
@@ -978,12 +962,11 @@ pub fn is_ecpri_data(data: &[u8]) -> types::Result<bool> {
 }
 
 // pub fn ecpri_parse(data: types::Input) -> types::Result<Self> {
-pub fn ecpri_parse(data: &[u8]) -> types::Result<SupportedType> {
-    let remaining: &[u8];
-    let msg_type: SupportedType;
+pub fn ecpri_parse(data: &[u8], mantissa: u16) -> EcpriType {
+    let msg_type: EcpriType;
 
     // check if the data is ecpri data
-    let (remain, is_ecpri) = is_ecpri_data(&data)?;
+    let (remain, is_ecpri) = is_ecpri_data(&data).expect("Can't parse the ECPRI header.");
     if !is_ecpri {
         panic!("This is not a ecpri package.");
     }
@@ -992,11 +975,16 @@ pub fn ecpri_parse(data: &[u8]) -> types::Result<SupportedType> {
     match &header.message_type {
         0 => {  // U-Plane IQ data
             println!("U-Plane IQ data.");
-            let (remain, iq_data) = UPlaneIQData::parse(&remain).expect("Can't parse U-Plane IQ data.");
-            remaining = remain;
-            use std::mem;
-            msg_type = SupportedType::IQData(iq_data);
-            println!("IQ data len: {}", mem::size_of::<UPlaneIQData>());
+            let (remain, iq_data) = UPlaneIQData::parse(&remain, mantissa).expect("Can't parse U-Plane IQ data.");
+            // use hex_slice::AsHex;
+            println!("IQ Prbu length: {}", iq_data.iq_prbu.len());
+            // for prbu in iq_data.iq_prbu.iter() {
+            //     println!("IQ data: {:?}", prbu);
+            // }
+            // println!("iq data: {:0X}", iq_data.as_hex());
+            msg_type = EcpriType::IQData(Box::new(iq_data));
+            // use std::mem;
+            // println!("IQ data len: {}", mem::size_of::<UPlaneIQData>());
         },
         2 => {  // Fast-Control Plane
             let (remain, timing_header) = TimingHeader::parse(&remain).expect("Can't parse timing header of ECPRI.");
@@ -1004,20 +992,17 @@ pub fn ecpri_parse(data: &[u8]) -> types::Result<SupportedType> {
                 0 => {
                     println!("Idle/Guard periods.");
                     let (remain, fcp_sect_type0) = FCPSectionType0::parse(&remain, timing_header.num_of_sections as usize).expect("Can't parse FCP section type 0 data.");
-                    remaining = remain;
-                    msg_type = SupportedType::FCPType0(fcp_sect_type0);
+                    msg_type = EcpriType::FCPType0(Box::new(fcp_sect_type0));
                 },
                 1 => {
                     println!("UL/DL channel.");
                     let (remain, fcp_sect_type1) = FCPSectionType1::parse(&remain, timing_header.num_of_sections as usize).expect("Can't parse FCP section type 1 data.");
-                    remaining = remain;
-                    msg_type = SupportedType::FCPType1(fcp_sect_type1);
+                    msg_type = EcpriType::FCPType1(Box::new(fcp_sect_type1));
                 },
                 3 => {
                     println!("PRACH/mixed numerology channel.");
                     let (remain, fcp_sect_type3) = FCPSectionType3::parse(&remain).expect("Can't parse FCP section type 3 data.");
-                    remaining = remain;
-                    msg_type = SupportedType::FCPType3(fcp_sect_type3);
+                    msg_type = EcpriType::FCPType3(Box::new(fcp_sect_type3));
                 },
                 item => { panic!("eCpri parse: timing header: section type: {} Shouldn't come here.", item); }
             }
@@ -1025,5 +1010,5 @@ pub fn ecpri_parse(data: &[u8]) -> types::Result<SupportedType> {
         _ => { panic!("eCpri parse: common header: Shouldn't come here."); }
     }
 
-    Ok((remaining, msg_type))
+    msg_type
 }

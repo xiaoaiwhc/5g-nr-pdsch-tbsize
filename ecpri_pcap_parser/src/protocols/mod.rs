@@ -1,4 +1,5 @@
 extern crate hex_slice;
+
 use hex_slice::AsHex;
 
 pub mod types;
